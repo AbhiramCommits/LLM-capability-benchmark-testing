@@ -1,0 +1,331 @@
+openapi: "3.1.0"
+
+info:
+  title: Document Management System
+  description: >
+    RESTful API for uploading, storing, searching, and managing documents
+    with metadata tagging.
+  version: "1.0.0"
+  contact:
+    name: DMS Team
+    email: dms-team@example.com
+
+servers:
+  - url: http://127.0.0.1:8000
+    description: Local development server
+
+tags:
+  - name: Documents
+    description: Document lifecycle operations
+
+paths:
+  /api/v1/documents/upload:
+    post:
+      tags:
+        - Documents
+      summary: Upload a new document
+      description: >
+        Upload a new document file alongside metadata (filename, tags, and
+        optional description). The file is stored in-memory and assigned a
+        unique hex identifier.
+      operationId: uploadDocument
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+                - filename
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The document file to upload.
+                filename:
+                  type: string
+                  description: Original filename including extension.
+                  example: "report.pdf"
+                tags:
+                  type: string
+                  description: Comma-separated list of tags.
+                  example: "finance,report"
+                description:
+                  type: string
+                  nullable: true
+                  description: Optional description of the document.
+                  example: "Q2 financial report"
+      responses:
+        "201":
+          description: Document uploaded successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          description: Invalid request body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/documents:
+    get:
+      tags:
+        - Documents
+      summary: List all documents
+      description: >
+        Retrieve a paginated list of all stored documents, ordered by upload
+        time with the most recently uploaded appearing first.
+      operationId: listDocuments
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number (1-indexed).
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Number of documents per page (max 100).
+      responses:
+        "200":
+          description: Paginated list of documents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListDocumentsResponse"
+
+  /api/v1/documents/{document_id}:
+    get:
+      tags:
+        - Documents
+      summary: Get a document by ID
+      description: >
+        Retrieve a single document's full record by its unique hex identifier.
+      operationId: getDocument
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Unique hex ID assigned during upload.
+      responses:
+        "200":
+          description: Document record returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetDocumentResponse"
+        "404":
+          description: No document found with the given ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      tags:
+        - Documents
+      summary: Delete a document
+      description: >
+        Permanently remove a document and its metadata from the system.
+        Once deleted, the document cannot be recovered.
+      operationId: deleteDocument
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Unique hex ID of the document to delete.
+      responses:
+        "200":
+          description: Document deleted successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteDocumentResponse"
+        "404":
+          description: No document found with the given ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/documents/search:
+    get:
+      tags:
+        - Documents
+      summary: Search documents by tag
+      description: >
+        Search for documents whose tags contain the given substring.
+        Matching is case-insensitive. Returns all matching documents
+        ordered by upload time (newest first). An empty result list is
+        returned when no matches are found.
+      operationId: searchDocuments
+      parameters:
+        - name: tag
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Substring to match against each document's tags.
+          example: "finance"
+      responses:
+        "200":
+          description: Search results returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchDocumentsResponse"
+        "400":
+          description: Missing or empty tag parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    DocumentMetadata:
+      type: object
+      required:
+        - filename
+      properties:
+        filename:
+          type: string
+          description: Original filename including extension.
+          example: "report.pdf"
+        tags:
+          type: array
+          items:
+            type: string
+          description: Free-form tags for categorization and search.
+          example: ["finance", "report"]
+        description:
+          type: string
+          nullable: true
+          description: Human-readable description of the document.
+          example: "Q2 financial report"
+
+    StoredDocument:
+      type: object
+      required:
+        - id
+        - filename
+        - size_bytes
+        - uploaded_at
+      properties:
+        id:
+          type: string
+          description: Unique hex identifier.
+          example: "a1b2c3d4e5f6"
+        filename:
+          type: string
+          description: Original filename.
+          example: "report.pdf"
+        tags:
+          type: array
+          items:
+            type: string
+          description: Categorization tags.
+          example: ["finance", "report"]
+        description:
+          type: string
+          nullable: true
+          description: Optional document description.
+          example: "Q2 financial report"
+        size_bytes:
+          type: integer
+          description: File size in bytes.
+          example: 1048576
+        uploaded_at:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC upload timestamp.
+          example: "2025-06-15T12:00:00.000000+00:00"
+
+    UploadResponse:
+      type: object
+      properties:
+        document:
+          $ref: "#/components/schemas/StoredDocument"
+        message:
+          type: string
+          description: Confirmation message.
+          example: "Document uploaded successfully."
+
+    ListDocumentsResponse:
+      type: object
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoredDocument"
+          description: List of document records for the current page.
+        total:
+          type: integer
+          description: Total documents in the store.
+          example: 42
+        page:
+          type: integer
+          description: Current page number (1-indexed).
+          example: 1
+        page_size:
+          type: integer
+          description: Maximum records per page.
+          example: 20
+
+    GetDocumentResponse:
+      type: object
+      properties:
+        document:
+          $ref: "#/components/schemas/StoredDocument"
+
+    DeleteDocumentResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          description: Confirmation message.
+          example: "Document 'a1b2c3d4e5f6' deleted successfully."
+        deleted_id:
+          type: string
+          description: ID of the deleted document.
+          example: "a1b2c3d4e5f6"
+
+    SearchDocumentsResponse:
+      type: object
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoredDocument"
+          description: Documents whose tags match the query.
+        query:
+          type: string
+          description: The search substring that was used.
+          example: "finance"
+        total_matches:
+          type: integer
+          description: Number of matching documents found.
+          example: 5
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: Human-readable error description.
+          example: "No document found with id 'unknown'."
