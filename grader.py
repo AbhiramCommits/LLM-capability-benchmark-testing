@@ -339,38 +339,65 @@ def _run_documentation_checks():
         text = api_ref.read_text()
         # Should have sections for the 5 new endpoints
         patterns = [
-            r"(?i)#+\s+.*(create|add).*collection",  # Create / Add to collection
-            r"(?i)#+\s+.*list.*collection",  # List collections
-            r"(?i)#+\s+.*get.*collection",  # Get collection
-            r"(?i)#+\s+.*delete.*collection",  # Delete collection
-            r"/api/v1/collections",  # Path referenced
+            (r"(?i)#+\s+.*(create|add).*collection", "Create/Add to collection"),
+            (r"(?i)#+\s+.*list.*collection", "List collections"),
+            (r"(?i)#+\s+.*get.*collection", "Get collection"),
+            (r"(?i)#+\s+.*delete.*collection", "Delete collection"),
+            (r"/api/v1/collections", "Collection path reference"),
         ]
-        matches = sum(1 for p in patterns if re.search(p, text))
-        score = min(10, matches * 2)
-        if matches < 3:
-            _fail(f"Check 6: api-reference.md has {matches}/5 expected Collection sections")
+        matches = []
+        for pat, label in patterns:
+            if re.search(pat, text):
+                matches.append(label)
+                score += 2
+        if len(matches) < 3:
+            _fail(
+                f"Check 6: api-reference.md has {len(matches)}/5 expected "
+                f"Collection sections (missing: "
+                f"{[l for p, l in patterns if l not in matches]}"
+            )
     else:
         _fail("Check 6: docs/api-reference.md not found")
 
-    RESULT["documentation_scores"]["check_6_api_reference_updated"] = score
+    RESULT["documentation_scores"]["check_6_api_reference_updated"] = min(10, score)
 
     # --- Check 7: openapi.yaml updated ---------------------------------------
     score = 0
     oapi = Path("docs/openapi.yaml")
     if oapi.exists():
         text = oapi.read_text()
-        # Check for collection paths
-        path_count = len(re.findall(r"/api/v1/collections", text))
+        # 7a: Check for collection path definitions (2 pts per path, max 4)
+        path_count = len(re.findall(r"\n\s+/api/v1/collections", text))
         score += min(4, path_count * 1)
 
-        # Check for collection-related schemas
+        # 7b: Check for collection-related schemas (3 pts)
         schema_refs = len(
             re.findall(
-                r"(?i)(Collection|CreateCollection|AddDocumentToCollection|CollectionList|CollectionResponse)",
+                r"(?i)(Collection|CreateCollection|AddDocumentToCollection|"
+                r"CollectionList|CollectionResponse)",
                 text,
             )
         )
-        score += min(6, schema_refs * 1)
+        if schema_refs >= 3:
+            score += 3
+
+        # 7c: Structural validation — verify $ref targets exist (3 pts)
+        # Only run if collection paths were actually added
+        if path_count >= 1:
+            try:
+                import yaml
+
+                spec = yaml.safe_load(text)
+                components = spec.get("components", {}).get("schemas", {})
+                ref_pattern = re.compile(r"#/components/schemas/(\w+)")
+                all_refs = set(ref_pattern.findall(text))
+                missing = [r for r in all_refs if r not in components]
+                if not missing:
+                    score += 3
+                else:
+                    _fail(f"Check 7: broken $ref targets in openapi.yaml: {missing}")
+            except Exception:
+                _fail("Check 7: could not parse openapi.yaml for structural validation")
 
         if score < 5:
             _fail(
@@ -443,8 +470,18 @@ def _run_documentation_checks():
     readme = Path("README.md")
     if readme.exists():
         text = readme.read_text()
-        if re.search(r"(?i)collection", text):
-            score = min(10, max(5, len(re.findall(r"(?i)collection", text)) * 2))
+        has_mention = re.search(r"(?i)collection", text) is not None
+
+        # Check endpoint table has collection rows
+        table_has_collections = bool(
+            re.search(r"\|\s*`(POST|GET|DELETE)`\s+\|\s*`/api/v1/collections", text)
+        )
+
+        if has_mention and table_has_collections:
+            score = 10
+        elif has_mention:
+            score = 5
+            _fail("Check 10: README mentions Collections but endpoint table not updated")
         else:
             _fail("Check 10: README does not mention Collections")
     else:
