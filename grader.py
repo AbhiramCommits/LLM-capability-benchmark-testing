@@ -44,7 +44,54 @@ RESULT = {
     "llm_score": 0,
     "total": 0,
     "failure_reasons": [],
+    "fairness_notes": [],
 }
+
+# ── Baseline inconsistencies catalogued so the grader doesn't penalize the ──
+# ── model for following a pattern that already exists in the codebase.     ──
+
+BASELINE_INCONSISTENCIES = {
+    "api_ref": {
+        # The Upload section uses "Field" as its parameter-table column header;
+        # sections 2-5 use "Parameter". Either convention is acceptable.
+        "mixed_column_headers": True,
+        # Sections 1-2 include a response-field table after the JSON example;
+        # sections 3-5 omit it. Both approaches are valid.
+        "response_field_table_optional": True,
+    },
+    "openapi": {
+        # The list endpoint has no error response (200-only). Other read
+        # endpoints include 404 or 400. A new GET endpoint is valid either way.
+        "error_response_optional_on_list": True,
+    },
+}
+
+
+def _scan_baseline_inconsistencies():
+    """Pre-scan existing docs to surface known inconsistencies for fairness."""
+    notes = []
+    api_ref = Path("docs/api-reference.md")
+    if api_ref.exists():
+        text = api_ref.read_text()
+        field_headers = len(re.findall(r"\| Field\s+\|", text))
+        param_headers = len(re.findall(r"\| Parameter\s+\|", text))
+        if field_headers > 0 and param_headers > 0:
+            notes.append(
+                f"api-reference.md mixes 'Field' ({field_headers}x) and "
+                f"'Parameter' ({param_headers}x) column headers. New docs "
+                f"following either convention will not be penalized."
+            )
+    cl = Path("CHANGELOG.md")
+    if cl.exists():
+        text = cl.read_text()
+        has_unreleased = "[Unreleased]" in text
+        notes.append(
+            f"CHANGELOG.md {'has' if has_unreleased else 'has no'} "
+            f"[Unreleased] section. A model adding one (or a new version "
+            f"header) either way is acceptable."
+        )
+    BASELINE_INCONSISTENCIES["_notes"] = notes
+    RESULT["fairness_notes"] = notes
 
 
 def _fail(reason: str) -> None:
@@ -332,101 +379,194 @@ def _run_procedural_checks():
 def _run_documentation_checks():
     """Check that all documentation artifacts were updated."""
 
-    # --- Check 6: api-reference.md updated -----------------------------------
+    _scan_baseline_inconsistencies()
+
+    # --- Check 6: api-reference.md updated with correct placement -----------
     score = 0
     api_ref = Path("docs/api-reference.md")
     if api_ref.exists():
         text = api_ref.read_text()
-        # Should have sections for the 5 new endpoints
-        patterns = [
+
+        # 6a: Section content — 5 collection-endpoint sections present (2 pts each)
+        section_patterns = [
             (r"(?i)#+\s+.*(create|add).*collection", "Create/Add to collection"),
             (r"(?i)#+\s+.*list.*collection", "List collections"),
             (r"(?i)#+\s+.*get.*collection", "Get collection"),
             (r"(?i)#+\s+.*delete.*collection", "Delete collection"),
             (r"/api/v1/collections", "Collection path reference"),
         ]
-        matches = []
-        for pat, label in patterns:
+        found_sections = []
+        for pat, label in section_patterns:
             if re.search(pat, text):
-                matches.append(label)
+                found_sections.append(label)
                 score += 2
-        if len(matches) < 3:
+
+        # 6b: Insertion position — sections must be after the original 5 (3 pts)
+        existing_last_section = re.search(
+            r"## 5\.\s+Search Documents", text
+        )
+        first_collection_section = re.search(
+            r"(?i)#+\s+.*(?:create|add|list|get|delete).*collection", text
+        )
+        if existing_last_section and first_collection_section:
+            if first_collection_section.start() > existing_last_section.start():
+                score += 3  # Correct: inserted after original sections
+            else:
+                _fail(
+                    "Check 6: Collections docs inserted before or inside "
+                    "existing sections — should come after section 5"
+                )
+        elif first_collection_section:
+            score += 3  # Edge case: original sections moved/reorganized, OK
+
+        # 6c: Table of Contents updated (1 pt)
+        if re.search(r"(?i)collection", text[:text.index("---")] if "---" in text else text[:500]):
+            score += 1
+
+        if len(found_sections) < 3:
             _fail(
-                f"Check 6: api-reference.md has {len(matches)}/5 expected "
+                f"Check 6: api-reference.md has {len(found_sections)}/5 expected "
                 f"Collection sections (missing: "
-                f"{[l for p, l in patterns if l not in matches]}"
+                f"{[l for _, l in section_patterns if l not in found_sections]})"
             )
     else:
         _fail("Check 6: docs/api-reference.md not found")
 
     RESULT["documentation_scores"]["check_6_api_reference_updated"] = min(10, score)
 
-    # --- Check 7: openapi.yaml updated ---------------------------------------
+    # --- Check 7: openapi.yaml updated with per-endpoint validation ----------
     score = 0
     oapi = Path("docs/openapi.yaml")
     if oapi.exists():
-        text = oapi.read_text()
-        # 7a: Check for collection path definitions (2 pts per path, max 4)
-        path_count = len(re.findall(r"\n\s+/api/v1/collections", text))
-        score += min(4, path_count * 1)
+        try:
+            import yaml
 
-        # 7b: Check for collection-related schemas (3 pts)
-        schema_refs = len(
-            re.findall(
-                r"(?i)(Collection|CreateCollection|AddDocumentToCollection|"
-                r"CollectionList|CollectionResponse)",
-                text,
-            )
-        )
-        if schema_refs >= 3:
-            score += 3
+            spec = yaml.safe_load(oapi.read_text())
+            paths = spec.get("paths", {})
+            components = spec.get("components", {}).get("schemas", {})
 
-        # 7c: Structural validation — verify $ref targets exist (3 pts)
-        # Only run if collection paths were actually added
-        if path_count >= 1:
-            try:
-                import yaml
+            # Find all collection-related paths
+            coll_paths = {
+                p: v for p, v in paths.items() if "/api/v1/collections" in p
+            }
 
-                spec = yaml.safe_load(text)
-                components = spec.get("components", {}).get("schemas", {})
+            if not coll_paths:
+                _fail("Check 7: no /api/v1/collections paths found in openapi.yaml")
+            else:
+                valid_endpoints = 0
+                total_endpoints = 0
+
+                for path, methods in coll_paths.items():
+                    for method, details in methods.items():
+                        total_endpoints += 1
+                        ep_ok = True
+
+                        # Required: summary
+                        if not details.get("summary"):
+                            _fail(f"Check 7: missing 'summary' on {method.upper()} {path}")
+                            ep_ok = False
+
+                        # Required: description
+                        if not details.get("description"):
+                            _fail(f"Check 7: missing 'description' on {method.upper()} {path}")
+                            ep_ok = False
+
+                        # Required: at least one response with content/schema
+                        responses = details.get("responses", {})
+                        has_response_schema = False
+                        for status, resp in responses.items():
+                            content = resp.get("content", {})
+                            for ct, ct_val in content.items():
+                                if "schema" in ct_val:
+                                    has_response_schema = True
+                                    break
+                        if not has_response_schema:
+                            _fail(f"Check 7: no response schema on {method.upper()} {path}")
+                            ep_ok = False
+
+                        # POST: must have requestBody with schema
+                        if method == "post":
+                            req_body = details.get("requestBody", {})
+                            body_content = req_body.get("content", {})
+                            has_body_schema = any(
+                                "schema" in v for v in body_content.values()
+                            )
+                            if not has_body_schema:
+                                _fail(f"Check 7: POST {path} missing requestBody schema")
+                                ep_ok = False
+
+                        if ep_ok:
+                            valid_endpoints += 1
+
+                # Score: base 4 pts for having paths, up to 6 more for
+                # endpoint quality (scaled by fraction of valid endpoints)
+                score += 4  # paths exist
+                if total_endpoints > 0:
+                    quality_ratio = valid_endpoints / total_endpoints
+                    score += int(round(quality_ratio * 6))
+
+                # Verify $ref targets resolve (bonus check, no penalty)
                 ref_pattern = re.compile(r"#/components/schemas/(\w+)")
-                all_refs = set(ref_pattern.findall(text))
+                all_refs = set(ref_pattern.findall(oapi.read_text()))
                 missing = [r for r in all_refs if r not in components]
-                if not missing:
-                    score += 3
-                else:
-                    _fail(f"Check 7: broken $ref targets in openapi.yaml: {missing}")
-            except Exception:
-                _fail("Check 7: could not parse openapi.yaml for structural validation")
+                if missing:
+                    _fail(f"Check 7: broken $ref targets: {missing}")
 
-        if score < 5:
-            _fail(
-                f"Check 7: openapi.yaml has {path_count} collection path(s) and"
-                f" ~{schema_refs} schema reference(s)"
-            )
+        except Exception as e:
+            _fail(f"Check 7: openapi.yaml parse/validation error: {e}")
     else:
         _fail("Check 7: docs/openapi.yaml not found")
 
     RESULT["documentation_scores"]["check_7_openapi_updated"] = min(10, score)
 
-    # --- Check 8: CHANGELOG.md updated ---------------------------------------
+    # --- Check 8: CHANGELOG.md updated with correct format -------------------
     score = 0
     cl = Path("CHANGELOG.md")
     if cl.exists():
         text = cl.read_text()
-        has_collections = re.search(r"(?i)collection", text) is not None
-        has_endpoints = re.search(r"(?i)(POST|GET|DELETE)\s+/api/v1/collection", text) is not None
-        if has_collections and has_endpoints:
-            score = 10
-        elif has_collections:
-            score = 5
-            _fail("Check 8: CHANGELOG mentions Collections but not specific endpoint paths")
+
+        # 8a: Collections mentioned (2 pts)
+        has_collections = bool(re.search(r"(?i)collection", text))
+        if has_collections:
+            score += 2
+
+            # 8b: Correct section header — [Unreleased] or new version (2 pts)
+            has_unreleased = bool(re.search(r"##\s+\[Unreleased\]", text))
+            has_new_version = bool(re.search(r"##\s+\[\d+\.\d+\.\d+\]", text))
+            if has_unreleased or has_new_version:
+                score += 2
+            else:
+                _fail("Check 8: no [Unreleased] or new version header for Collections entry")
+
+            # 8c: Endpoint paths in backtick format matching existing style (3 pts)
+            collection_entries = re.findall(
+                r"-\s+`(POST|GET|DELETE)\s+/api/v1/collections[^`]*`\s*[—\-]\s*.+",
+                text,
+            )
+            if len(collection_entries) >= 3:
+                score += 3
+            elif len(collection_entries) >= 1:
+                score += 1
+                _fail(f"Check 8: only {len(collection_entries)} endpoint(s) listed in changelog (expected >=3)")
+
+            # 8d: Entry follows the verb—description pattern of existing entries (3 pts)
+            detailed_entries = len(
+                re.findall(
+                    r"-\s+`(?:POST|GET|DELETE)\s+/api/v1/collections[^`]*`\s*[—\-]\s*\w+\s.+",
+                    text,
+                )
+            )
+            if detailed_entries >= 2:
+                score += 3
+            elif detailed_entries >= 1:
+                score += 1
         else:
             _fail("Check 8: CHANGELOG.md has no Collections entry")
+
     else:
         _fail("Check 8: CHANGELOG.md not found")
 
-    RESULT["documentation_scores"]["check_8_changelog_updated"] = score
+    RESULT["documentation_scores"]["check_8_changelog_updated"] = min(10, score)
 
     # --- Check 9: Route functions have docstrings ----------------------------
     score = 0
@@ -548,7 +688,16 @@ def _run_llm_check():
         RESULT["llm_score"] = 0
         return
 
-    # Build prompt
+    # Build prompt with fairness context
+    fairness_block = ""
+    if BASELINE_INCONSISTENCIES.get("_notes"):
+        fairness_block = (
+            "\n\nFAIRNESS NOTE — The existing documentation has some known "
+            "inconsistencies. Do NOT penalize the new documentation for "
+            "following either pattern from the existing docs:\n"
+            + "\n".join(f"- {n}" for n in BASELINE_INCONSISTENCIES["_notes"])
+        )
+
     prompt = f"""You are evaluating a software engineer's documentation updates for consistency.
 
 Below is the EXISTING documentation (style, depth, format to match):
@@ -558,6 +707,7 @@ Below is the EXISTING documentation (style, depth, format to match):
 Below is the NEW documentation added for a "Collections" feature:
 
 {new_excerpt[:6000]}
+{fairness_block}
 
 Rate the new documentation on a scale of 0-10 for how consistent it is with the existing documentation in:
 - Level of detail (parameter tables, response examples, error cases)
@@ -660,6 +810,11 @@ def main():
         print("\n  Failures:")
         for reason in RESULT["failure_reasons"]:
             print(f"    - {reason}")
+
+    if RESULT.get("fairness_notes"):
+        print("\n  Fairness Notes (baseline inconsistencies — not penalized):")
+        for note in RESULT["fairness_notes"]:
+            print(f"    - {note}")
 
     print()
 
